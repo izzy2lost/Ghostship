@@ -88,6 +88,15 @@ jobs:
         run: |
           APK=android/app/build/outputs/apk/debug/app-debug.apk
           ls -la "$APK" || (echo "ERROR: APK not found" && exit 1)
+          # Every asset GameAssets.kt opens by name. An APK missing any of them
+          # installs and launches fine, then fails on device during staging, so
+          # check here instead. Both ways of losing one — a build directory the
+          # asset merge never waited for, a source file gitignore swallowed —
+          # left CI green and the APK unusable.
+          for entry in assets/gamedata.zip assets/gamedata.version \
+                       assets/gamecontrollerdb.txt assets/mods/place_mods_here.txt; do
+            unzip -Z1 "$APK" | grep -qx "$entry" || (echo "ERROR: $entry missing from the APK" && exit 1)
+          done
           cp "$APK" Ghostship-debug.apk
       - uses: actions/upload-artifact@v4
         with:

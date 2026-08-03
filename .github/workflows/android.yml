@@ -1,0 +1,95 @@
+name: Android
+
+# Android on its own, so a device test does not wait on the other five
+# platforms in GenerateBuilds. Runs on demand, and on pushes that touch
+# something the APK actually contains.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android/**'
+      - 'src/**'
+      - 'include/**'
+      - 'assets/**'
+      - 'cmake/**'
+      - 'config.yml'
+      - 'CMakeLists.txt'
+      - 'libultraship'
+      - '.github/workflows/android.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The engine archive is the one thing the app cannot build on device: packing
+  # it needs the Torch executable, and the NDK build has no host toolchain. The
+  # game's own assets are extracted from the player's ROM on device.
+  generate-port-o2r:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # full history so the libultraship submodule gitlink resolves
+      - name: Extract project version
+        id: extract_version
+        run: |
+          VERSION=$(grep -oP '^\s*project\s*\([^)]*VERSION\s+\K[0-9\.]+' CMakeLists.txt)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc g++ git cmake ninja-build lsb-release zlib1g-dev
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: android-o2r-${{ github.ref }}
+      - name: Generate ghostship.o2r
+        run: |
+          export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+          make -C Torch type=release -j3
+          Torch/cmake-build-release/torch pack port ghostship.o2r o2r -u ${{ steps.extract_version.outputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghostship.o2r
+          path: ghostship.o2r
+          retention-days: 1
+
+  build-apk:
+    needs: generate-port-o2r
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK components
+        # NDK and SDK versions match android/app/build.gradle.kts
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "cmake;3.30.3" "ndk;30.0.15729638" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+      - name: Install Python dependencies
+        run: pip install -r libultraship/requirements.txt
+      # gamedata.zip is packed from the repo root, so the o2r must land there first
+      - name: Download ghostship.o2r
+        uses: actions/download-artifact@v4
+        with:
+          name: ghostship.o2r
+          path: .
+      # Debug-signed and debuggable, which is what you want for sideloading a
+      # test build; the release APK comes from GenerateBuilds.
+      - name: Build debug APK
+        run: android/gradlew -p android assembleDebug
+      - name: Collect APK
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          ls -la "$APK" || (echo "ERROR: APK not found" && exit 1)
+          cp "$APK" Ghostship-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ghostship-debug-apk
+          path: Ghostship-debug.apk
